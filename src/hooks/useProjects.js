@@ -5,7 +5,6 @@ import {
   deleteDoc,
   doc,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   updateDoc,
@@ -27,16 +26,23 @@ export function useProjects(userId) {
     setLoading(true)
     const q = query(
       collection(db, 'projects'),
-      where('ownerId', '==', userId),
-      orderBy('createdAt', 'asc')
+      where('ownerId', '==', userId)
     )
     const unsub = onSnapshot(
       q,
       (snap) => {
-        setProjects(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        // 클라이언트 측 정렬 (createdAt asc, 없으면 맨 뒤)
+        list.sort((a, b) => {
+          const at = a.createdAt?.toMillis?.() ?? Number.MAX_SAFE_INTEGER
+          const bt = b.createdAt?.toMillis?.() ?? Number.MAX_SAFE_INTEGER
+          return at - bt
+        })
+        setProjects(list)
         setLoading(false)
       },
       (err) => {
+        console.error('useProjects query error:', err)
         setError(err.message)
         setLoading(false)
       }
