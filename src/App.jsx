@@ -7,7 +7,11 @@ import {
 } from 'firebase/auth'
 import { auth, googleProvider } from './firebase'
 import { useProjects } from './hooks/useProjects'
+import { useCells } from './hooks/useCells'
 import ProjectList from './components/ProjectList'
+import PromptInput from './components/PromptInput'
+import CellGrid from './components/CellGrid'
+import CellDetailPanel from './components/CellDetailPanel'
 import TaskLog from './components/TaskLog'
 import { TaskLogProvider, useTaskLog } from './contexts/TaskLogContext'
 
@@ -17,18 +21,18 @@ function AppShell() {
   const [authError, setAuthError] = useState(null)
   const [workMode, setWorkMode] = useState(false)
   const [selectedProjectId, setSelectedProjectId] = useState(null)
+  const [selectedCellId, setSelectedCellId] = useState(null)
   const taskLog = useTaskLog()
 
-  const { projects, loading, createProject, updateProject, deleteProject } =
+  const { projects, loading, createProject, updateProject, deleteProject, addCells } =
     useProjects(user?.uid)
+  const { cells, deleteCell } = useCells(selectedProjectId)
 
   useEffect(() => {
-    // 리디렉션 복귀 시 결과 처리
     getRedirectResult(auth).catch((err) => {
       console.error('Redirect error:', err)
       setAuthError(err.message)
     })
-
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u)
       setAuthLoading(false)
@@ -44,6 +48,11 @@ function AppShell() {
       setSelectedProjectId(projects[0]?.id || null)
     }
   }, [projects, selectedProjectId])
+
+  // 프로젝트 바뀌면 선택 셀 해제
+  useEffect(() => {
+    setSelectedCellId(null)
+  }, [selectedProjectId])
 
   const handleSignIn = async () => {
     setAuthError(null)
@@ -100,6 +109,45 @@ function AppShell() {
     }
   }
 
+  const handleAddCells = async (prompts) => {
+    if (!selectedProjectId) return
+    const taskId = taskLog.startTask(`${prompts.length}개 프롬프트 저장 중…`)
+    try {
+      await addCells(selectedProjectId, prompts)
+      taskLog.succeedTask(taskId, `${prompts.length}개 프롬프트 저장됨`)
+    } catch (e) {
+      console.error('Add cells failed:', e)
+      taskLog.failTask(taskId, `저장 실패: ${e.message}`)
+      throw e
+    }
+  }
+
+  const handleDeleteCell = async (cell) => {
+    const taskId = taskLog.startTask(`${cell.identifier} 삭제 중…`)
+    try {
+      await deleteCell(selectedProjectId, cell.id)
+      taskLog.succeedTask(taskId, `${cell.identifier} 삭제됨`)
+      setSelectedCellId(null)
+    } catch (e) {
+      console.error('Delete cell failed:', e)
+      taskLog.failTask(taskId, `삭제 실패: ${e.message}`)
+    }
+  }
+
+  const handleCopyPrompt = async (cell) => {
+    try {
+      await navigator.clipboard.writeText(cell.prompt)
+      taskLog.startTask(`${cell.identifier} 프롬프트 복사됨`)
+      // 복사는 즉시 success로 전환
+      setTimeout(() => {
+        // no-op; task log 자체가 3초 뒤 사라지니 startTask만으로 충분
+      }, 0)
+    } catch (e) {
+      console.error('Copy failed:', e)
+      taskLog.failTask(taskLog.startTask('복사 실패'), e.message)
+    }
+  }
+
   if (authLoading) {
     return (
       <div className="app">
@@ -151,6 +199,7 @@ function AppShell() {
   }
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId)
+  const selectedCell = cells.find((c) => c.id === selectedCellId)
 
   return (
     <div className="app">
@@ -194,16 +243,26 @@ function AppShell() {
 
         <main className="workspace">
           {selectedProject ? (
-            <div className="workspace__empty">
-              <div className="workspace__title">{selectedProject.name}</div>
-              <div className="workspace__sub">
-                접두어: <code>{selectedProject.prefix}</code> · 셀{' '}
-                {selectedProject.cellCount || 0}개
+            <>
+              <div className="workspace__head">
+                <div className="workspace__title-row">
+                  <h2 className="workspace__title">{selectedProject.name}</h2>
+                  <span className="workspace__meta">
+                    <code>{selectedProject.prefix}</code> ·{' '}
+                    {cells.length}개
+                  </span>
+                </div>
               </div>
-              <div className="workspace__placeholder">
-                Step 4에서 프롬프트 입력창과 셀 격자가 연결됩니다
-              </div>
-            </div>
+
+              <PromptInput onSubmit={handleAddCells} />
+
+              <CellGrid
+                cells={cells}
+                selectedId={selectedCellId}
+                onSelect={(c) => setSelectedCellId(c.id)}
+                workMode={workMode}
+              />
+            </>
           ) : (
             <div className="workspace__empty">
               <div className="workspace__title">프로젝트를 선택하세요</div>
@@ -214,6 +273,15 @@ function AppShell() {
           )}
         </main>
       </div>
+
+      {selectedCell && (
+        <CellDetailPanel
+          cell={selectedCell}
+          onClose={() => setSelectedCellId(null)}
+          onDelete={handleDeleteCell}
+          onCopy={handleCopyPrompt}
+        />
+      )}
 
       <TaskLog />
     </div>
