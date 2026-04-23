@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import {
+  getRedirectResult,
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth'
 import { auth, googleProvider } from './firebase'
@@ -22,6 +23,12 @@ function AppShell() {
     useProjects(user?.uid)
 
   useEffect(() => {
+    // 리디렉션 복귀 시 결과 처리
+    getRedirectResult(auth).catch((err) => {
+      console.error('Redirect error:', err)
+      setAuthError(err.message)
+    })
+
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u)
       setAuthLoading(false)
@@ -41,7 +48,7 @@ function AppShell() {
   const handleSignIn = async () => {
     setAuthError(null)
     try {
-      await signInWithPopup(auth, googleProvider)
+      await signInWithRedirect(auth, googleProvider)
     } catch (e) {
       setAuthError(e.message)
     }
@@ -62,6 +69,7 @@ function AppShell() {
       taskLog.succeedTask(taskId, `프로젝트 "${name}" 생성됨`)
       setSelectedProjectId(id)
     } catch (e) {
+      console.error('Create project failed:', e)
       taskLog.failTask(taskId, `생성 실패: ${e.message}`)
       throw e
     }
@@ -73,6 +81,7 @@ function AppShell() {
       await updateProject(id, patch)
       taskLog.succeedTask(taskId, `프로젝트 수정됨`)
     } catch (e) {
+      console.error('Update project failed:', e)
       taskLog.failTask(taskId, `수정 실패: ${e.message}`)
       throw e
     }
@@ -85,6 +94,7 @@ function AppShell() {
       await deleteProject(id)
       taskLog.succeedTask(taskId, `프로젝트 삭제됨`)
     } catch (e) {
+      console.error('Delete project failed:', e)
       taskLog.failTask(taskId, `삭제 실패: ${e.message}`)
       throw e
     }
