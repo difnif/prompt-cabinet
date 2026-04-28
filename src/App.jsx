@@ -8,11 +8,14 @@ import {
 import { auth, googleProvider } from './firebase'
 import { useProjects } from './hooks/useProjects'
 import { useCells } from './hooks/useCells'
+import { useSettings } from './hooks/useSettings'
 import ProjectList from './components/ProjectList'
 import PromptInput from './components/PromptInput'
 import CellGrid from './components/CellGrid'
 import CellDetailPanel from './components/CellDetailPanel'
 import TaskLog from './components/TaskLog'
+import SortMenu, { sortCells } from './components/SortMenu'
+import SettingsModal from './components/SettingsModal'
 import { TaskLogProvider, useTaskLog } from './contexts/TaskLogContext'
 
 function AppShell() {
@@ -22,11 +25,13 @@ function AppShell() {
   const [workMode, setWorkMode] = useState(false)
   const [selectedProjectId, setSelectedProjectId] = useState(null)
   const [selectedCellId, setSelectedCellId] = useState(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const taskLog = useTaskLog()
+  const { settings, update: updateSettings, reset: resetSettings } = useSettings()
 
   const { projects, loading, createProject, updateProject, deleteProject, addCells } =
     useProjects(user?.uid)
-  const { cells, deleteCell } = useCells(selectedProjectId)
+  const { cells, deleteCell, updateCell } = useCells(selectedProjectId)
 
   useEffect(() => {
     getRedirectResult(auth).catch((err) => {
@@ -49,7 +54,6 @@ function AppShell() {
     }
   }, [projects, selectedProjectId])
 
-  // 프로젝트 바뀌면 선택 셀 해제
   useEffect(() => {
     setSelectedCellId(null)
   }, [selectedProjectId])
@@ -137,14 +141,22 @@ function AppShell() {
   const handleCopyPrompt = async (cell) => {
     try {
       await navigator.clipboard.writeText(cell.prompt)
-      taskLog.startTask(`${cell.identifier} 프롬프트 복사됨`)
-      // 복사는 즉시 success로 전환
-      setTimeout(() => {
-        // no-op; task log 자체가 3초 뒤 사라지니 startTask만으로 충분
-      }, 0)
+      const id = taskLog.startTask(`${cell.identifier} 프롬프트 복사됨`)
+      taskLog.succeedTask(id, `${cell.identifier} 프롬프트 복사됨`)
     } catch (e) {
       console.error('Copy failed:', e)
-      taskLog.failTask(taskLog.startTask('복사 실패'), e.message)
+      const id = taskLog.startTask('복사 실패')
+      taskLog.failTask(id, e.message)
+    }
+  }
+
+  const handleRatingChange = async (cell, rating) => {
+    try {
+      await updateCell(selectedProjectId, cell.id, { rating })
+    } catch (e) {
+      console.error('Rating update failed:', e)
+      const id = taskLog.startTask('별점 업데이트 실패')
+      taskLog.failTask(id, e.message)
     }
   }
 
@@ -199,7 +211,8 @@ function AppShell() {
   }
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId)
-  const selectedCell = cells.find((c) => c.id === selectedCellId)
+  const sortedCells = sortCells(cells, settings.sortBy)
+  const selectedCell = sortedCells.find((c) => c.id === selectedCellId)
 
   return (
     <div className="app">
@@ -223,6 +236,14 @@ function AppShell() {
                 작업 모드 {workMode ? 'ON' : 'OFF'}
               </span>
             </label>
+            <button
+              className="btn-icon"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="환경설정"
+              title="환경설정"
+            >
+              ⚙
+            </button>
             <button className="btn-ghost" onClick={handleSignOut}>
               로그아웃
             </button>
@@ -248,19 +269,26 @@ function AppShell() {
                 <div className="workspace__title-row">
                   <h2 className="workspace__title">{selectedProject.name}</h2>
                   <span className="workspace__meta">
-                    <code>{selectedProject.prefix}</code> ·{' '}
-                    {cells.length}개
+                    <code>{selectedProject.prefix}</code> · {cells.length}개
                   </span>
+                </div>
+                <div className="workspace__tools">
+                  <SortMenu
+                    value={settings.sortBy}
+                    onChange={(v) => updateSettings({ sortBy: v })}
+                  />
                 </div>
               </div>
 
               <PromptInput onSubmit={handleAddCells} />
 
               <CellGrid
-                cells={cells}
+                cells={sortedCells}
                 selectedId={selectedCellId}
                 onSelect={(c) => setSelectedCellId(c.id)}
                 workMode={workMode}
+                showRatingDots={settings.showRatingDots}
+                showImageCountBadge={settings.showImageCountBadge}
               />
             </>
           ) : (
@@ -277,11 +305,23 @@ function AppShell() {
       {selectedCell && (
         <CellDetailPanel
           cell={selectedCell}
+          userId={user.uid}
+          projectId={selectedProjectId}
           onClose={() => setSelectedCellId(null)}
           onDelete={handleDeleteCell}
           onCopy={handleCopyPrompt}
+          onRatingChange={handleRatingChange}
+          taskLog={taskLog}
         />
       )}
+
+      <SettingsModal
+        open={settingsOpen}
+        settings={settings}
+        onUpdate={updateSettings}
+        onReset={resetSettings}
+        onClose={() => setSettingsOpen(false)}
+      />
 
       <TaskLog />
     </div>
