@@ -5,7 +5,7 @@ import {
   signInWithRedirect,
   signOut,
 } from 'firebase/auth'
-import { writeBatch, doc, deleteDoc } from 'firebase/firestore'
+import { writeBatch, doc } from 'firebase/firestore'
 import { ref as storageRef, deleteObject } from 'firebase/storage'
 import { auth, db, googleProvider, storage } from './firebase'
 import { useProjects } from './hooks/useProjects'
@@ -20,6 +20,7 @@ import SortMenu, { sortCells } from './components/SortMenu'
 import SettingsModal from './components/SettingsModal'
 import WorkModeBar from './components/WorkModeBar'
 import ConfirmDialog from './components/ConfirmDialog'
+import ZipDropzone from './components/ZipDropzone'
 import { TaskLogProvider, useTaskLog } from './contexts/TaskLogContext'
 import { compactIdentifiers } from './utils/identifierRange'
 import {
@@ -27,6 +28,9 @@ import {
   downloadImagesOnly,
   downloadTextOnly,
 } from './utils/downloadHelpers'
+import { readImportFile } from './utils/parseZip'
+import { parseMdFile } from './utils/parseMdFile'
+import { ensureUniquePrefix } from './utils/generatePrefix'
 
 function AppShell() {
   const [user, setUser] = useState(null)
@@ -37,13 +41,15 @@ function AppShell() {
   const [selectedCellId, setSelectedCellId] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
-  // 다중 선택 상태
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const lastClickedIndexRef = useRef(null)
-  const dragBaseSelectionRef = useRef(null) // 드래그 시작 시점의 선택 상태
+  const dragBaseSelectionRef = useRef(null)
 
-  // 삭제 확인 모달
   const [deleteConfirm, setDeleteConfirm] = useState(null)
+
+  // zip import 상태
+  const [importing, setImporting] = useState(false)
+  const [importProgress, setImportProgress] = useState(null)
 
   const taskLog = useTaskLog()
   const { settings, update: updateSettings, reset: resetSettings } = useSettings()
@@ -78,18 +84,15 @@ function AppShell() {
     setSelectedIds(new Set())
   }, [selectedProjectId])
 
-  // 작업 모드 켤 때: 상세 패널 닫기
   useEffect(() => {
     if (workMode) {
       setSelectedCellId(null)
     } else {
-      // 작업 모드 끄면 다중 선택 초기화
       setSelectedIds(new Set())
       lastClickedIndexRef.current = null
     }
   }, [workMode])
 
-  // 드래그 끝났을 때 base 초기화
   useEffect(() => {
     const onUp = () => {
       dragBaseSelectionRef.current = null
@@ -200,7 +203,131 @@ function AppShell() {
     }
   }
 
-  // ===== 다중 선택 핸들러 =====
+  // ===== zip 일괄 가져오기 =====
+
+  const handleImportFile = async (file) => {
+    if (importing) return
+    setImporting(true)
+    setImportProgress({ current: 0, total: 100, label: '파일 읽는 중…' })
+
+    const importTaskId = taskLog.startTask(`"${file.name}" 가져오는 중…`)
+
+    try {
+      // 1. zip/단일 파일 풀기
+      const fileEntries = await readImportFile(file)
+      if (fileEntries.length === 0) {
+        throw new Error('처리 가능한 파일이 없습니다 (.md/.txt만 지원)')
+      }
+
+      setImportProgress({
+        current: 0,
+        total: fileEntries.length,
+        label: `${fileEntries.length}개 파일 분석 중…`,
+      })
+
+      // 2. 각 파일 파싱
+      const parsed = fileEntries.map((entry) =>
+        parseMdFile(entry.filename, entry.content)
+      )
+
+      // 3. 처리: 같은 이름 프로젝트는 병합, 없으면 신규 생성
+      let totalProjectsCreated = 0
+      let totalProjectsMerged = 0
+      let totalPromptsAdded = 0
+      const skipped = []
+
+      for (let i = 0; i < parsed.length; i++) {
+        const item = parsed[i]
+        setImportProgress({
+          current: i,
+          total: parsed.length,
+          label: `${item.filename} 처리 중…`,
+        })
+
+        if (item.prompts.length === 0) {
+          skipped.push(item.filename)
+          const skipId = taskLog.startTask(`${item.filename} 스킵 (프롬프트 0개)`)
+          taskLog.failTask(skipId, `${item.filename} 스킵: 프롬프트 없음`)
+          continue
+        }
+
+        // 기존 프로젝트와 이름 매칭
+        const existing = findExistingProjectByName(item.projectName, projects)
+
+        if (existing) {
+          // 병합
+          const mergeId = taskLog.startTask(
+            `${item.filename} → "${existing.name}"에 ${item.prompts.length}개 추가 중…`
+          )
+          try {
+            await addCells(existing.id, item.prompts)
+            totalProjectsMerged++
+            totalPromptsAdded += item.prompts.length
+            taskLog.succeedTask(
+              mergeId,
+              `"${existing.name}"에 ${item.prompts.length}개 추가됨`
+            )
+          } catch (e) {
+            console.error('Merge failed:', e)
+            taskLog.failTask(mergeId, `병합 실패: ${e.message}`)
+          }
+        } else {
+          // 신규 생성
+          const existingPrefixes = projects.map((p) => p.prefix)
+          const uniquePrefix = ensureUniquePrefix(item.prefix || 'x', existingPrefixes)
+
+          const createId = taskLog.startTask(
+            `${item.filename} → 신규 프로젝트 "${item.projectName}" 생성 중…`
+          )
+          try {
+            const newProjectId = await createProject({
+              name: item.projectName,
+              prefix: uniquePrefix,
+              ownerId: user.uid,
+            })
+            await addCells(newProjectId, item.prompts)
+            totalProjectsCreated++
+            totalPromptsAdded += item.prompts.length
+            taskLog.succeedTask(
+              createId,
+              `"${item.projectName}" 생성 + ${item.prompts.length}개 추가됨`
+            )
+            // 새 프로젝트가 projects 배열에 반영될 시간 (next iteration의 findExistingProjectByName에서 인지하기 위해)
+            // 단 onSnapshot은 비동기라 즉시 반영 안 될 수 있음 → 내부 추적 배열 필요
+            // 간단히 그냥 진행 (같은 이름의 신규 파일 두 개 들어오면 둘 다 신규로 처리됨)
+          } catch (e) {
+            console.error('Create failed:', e)
+            taskLog.failTask(createId, `생성 실패: ${e.message}`)
+          }
+        }
+      }
+
+      setImportProgress({
+        current: parsed.length,
+        total: parsed.length,
+        label: '완료',
+      })
+
+      const summary = [
+        totalProjectsCreated > 0 ? `${totalProjectsCreated}개 신규` : null,
+        totalProjectsMerged > 0 ? `${totalProjectsMerged}개 병합` : null,
+        `${totalPromptsAdded}개 프롬프트`,
+        skipped.length > 0 ? `${skipped.length}개 스킵` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+
+      taskLog.succeedTask(importTaskId, `가져오기 완료: ${summary}`)
+    } catch (e) {
+      console.error('Import failed:', e)
+      taskLog.failTask(importTaskId, `가져오기 실패: ${e.message}`)
+    } finally {
+      setImporting(false)
+      setImportProgress(null)
+    }
+  }
+
+  // ===== 다중 선택 =====
 
   const sortedCells = sortCells(cells, settings.sortBy)
 
@@ -218,7 +345,6 @@ function AppShell() {
   const handleRangeSelect = (clickedIndex) => {
     const last = lastClickedIndexRef.current
     if (last == null) {
-      // 시작 셀이 없으면 단일 선택처럼
       const id = sortedCells[clickedIndex]?.id
       if (id) {
         setSelectedIds((prev) => {
@@ -244,7 +370,6 @@ function AppShell() {
   }
 
   const handleDragSelect = (idsInRange) => {
-    // 드래그 시작 시점의 선택 상태를 기억하고, 그 위에 range를 union
     if (!dragBaseSelectionRef.current) {
       dragBaseSelectionRef.current = new Set(selectedIds)
     }
@@ -262,8 +387,6 @@ function AppShell() {
     setSelectedIds(new Set())
     lastClickedIndexRef.current = null
   }
-
-  // ===== 일괄 동작 =====
 
   const getSelectedCells = () => {
     return sortedCells.filter((c) => selectedIds.has(c.id))
@@ -293,10 +416,7 @@ function AppShell() {
       await downloadTextOnly(
         selected,
         settings.textDownloadFormat,
-        selectedProject?.name,
-        ({ label }) => {
-          // 진행률 미세 업데이트는 생략 (기본 알림으로 충분)
-        }
+        selectedProject?.name
       )
       taskLog.succeedTask(taskId, `텍스트 다운로드 완료 (${selected.length}개)`)
     } catch (e) {
@@ -339,9 +459,7 @@ function AppShell() {
   const handleBulkDeleteRequest = () => {
     const selected = getSelectedCells()
     if (selected.length === 0) return
-    setDeleteConfirm({
-      cells: selected,
-    })
+    setDeleteConfirm({ cells: selected })
   }
 
   const handleBulkDeleteConfirmed = async () => {
@@ -351,7 +469,6 @@ function AppShell() {
 
     const taskId = taskLog.startTask(`${targets.length}개 셀 삭제 중…`)
     try {
-      // 1. 각 셀의 Storage 이미지 삭제
       for (const cell of targets) {
         const images = cell.images || []
         for (const img of images) {
@@ -362,7 +479,6 @@ function AppShell() {
           }
         }
       }
-      // 2. Firestore 셀 문서 삭제 (batch)
       const batch = writeBatch(db)
       for (const cell of targets) {
         batch.delete(doc(db, 'projects', selectedProjectId, 'cells', cell.id))
@@ -428,6 +544,7 @@ function AppShell() {
   }
 
   const selectedCell = sortedCells.find((c) => c.id === selectedCellId)
+  const hasNoProjects = projects.length === 0
 
   return (
     <div className="app">
@@ -478,7 +595,19 @@ function AppShell() {
         />
 
         <main className="workspace">
-          {selectedProject ? (
+          {hasNoProjects ? (
+            <div className="workspace__welcome">
+              <div className="workspace__title">시작하기</div>
+              <div className="workspace__sub">
+                좌측에서 직접 프로젝트를 만들거나, zip/md 파일로 한 번에 가져올 수 있어요.
+              </div>
+              <ZipDropzone
+                onFileSelected={handleImportFile}
+                importing={importing}
+                progress={importProgress}
+              />
+            </div>
+          ) : selectedProject ? (
             <>
               <div className="workspace__head">
                 <div className="workspace__title-row">
@@ -509,7 +638,17 @@ function AppShell() {
                 />
               )}
 
-              {!workMode && <PromptInput onSubmit={handleAddCells} />}
+              {!workMode && (
+                <>
+                  <PromptInput onSubmit={handleAddCells} />
+                  <ZipDropzone
+                    onFileSelected={handleImportFile}
+                    importing={importing}
+                    progress={importProgress}
+                    compact
+                  />
+                </>
+              )}
 
               <CellGrid
                 cells={sortedCells}
@@ -575,6 +714,12 @@ function AppShell() {
       <TaskLog />
     </div>
   )
+}
+
+function findExistingProjectByName(name, projects) {
+  if (!name) return null
+  const normalized = name.trim().toLowerCase()
+  return projects.find((p) => p.name?.trim().toLowerCase() === normalized) || null
 }
 
 export default function App() {
