@@ -2,30 +2,62 @@
 
 const BULLET_PATTERN = /^\s*(?:\d+[.)]|\(\d+\)|[-•*→]|#+)\s+/
 
-const HEADER_KEYS = ['프로젝트명', '접두어', 'project', 'prefix']
+const HEADER_KEYS_NAME = ['프로젝트명', 'project', 'name', '제목']
+const HEADER_KEYS_PREFIX = ['접두어', 'prefix']
 
 function stripBullet(line) {
   return line.replace(BULLET_PATTERN, '').trim()
 }
 
-function looksLikeHeader(line) {
+function parseHeaderLine(line) {
   const colonIdx = line.indexOf(':')
-  if (colonIdx === -1) return false
+  if (colonIdx === -1) return null
   const key = line.slice(0, colonIdx).trim().toLowerCase()
-  return HEADER_KEYS.some((h) => key === h.toLowerCase())
+  const value = line.slice(colonIdx + 1).trim()
+  if (!value) return null
+  if (HEADER_KEYS_NAME.some((h) => key === h.toLowerCase())) {
+    return { type: 'name', value }
+  }
+  if (HEADER_KEYS_PREFIX.some((h) => key === h.toLowerCase())) {
+    return { type: 'prefix', value }
+  }
+  return null
+}
+
+function looksLikeHeader(line) {
+  return parseHeaderLine(line) !== null
+}
+
+/**
+ * 텍스트 첫 블록에서 헤더(프로젝트명/접두어) 추출.
+ */
+export function extractHeaders(raw) {
+  if (!raw || !raw.trim()) return { name: null, prefix: null }
+  const blocks = raw.split(/\n\s*\n+/)
+  if (blocks.length === 0) return { name: null, prefix: null }
+  const firstBlock = blocks[0]
+  const lines = firstBlock
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+
+  let name = null
+  let prefix = null
+  for (const l of lines) {
+    const h = parseHeaderLine(l)
+    if (!h) continue
+    if (h.type === 'name' && !name) name = h.value
+    if (h.type === 'prefix' && !prefix) prefix = h.value
+  }
+  return { name, prefix }
 }
 
 /**
  * 텍스트를 프롬프트 배열로 변환.
- * - 빈 줄로 블록 분리
- * - 앞 번호/불릿 제거
- * - 첫 블록이 헤더(프로젝트명/접두어)면 drop
- * - 빈 블록 skip
  */
 export function parsePrompts(raw) {
   if (!raw || !raw.trim()) return []
 
-  // 빈 줄(공백만 있는 줄 포함)로 블록 분리
   const blocks = raw.split(/\n\s*\n+/)
 
   const prompts = []
@@ -39,18 +71,15 @@ export function parsePrompts(raw) {
 
     if (lines.length === 0) continue
 
-    // 첫 블록이 헤더 라인들만 있으면 통째로 skip
     if (!firstBlockChecked) {
       firstBlockChecked = true
       const allHeader = lines.every((l) => looksLikeHeader(l))
       if (allHeader) continue
     }
 
-    // 헤더 라인이 섞여있으면 해당 라인만 제거
     const cleaned = lines.filter((l) => !looksLikeHeader(l)).map(stripBullet)
     if (cleaned.length === 0) continue
 
-    // 프롬프트는 한 줄로 합침 (여러 줄이면 공백으로 이어붙임)
     const text = cleaned.join(' ').trim()
     if (text.length === 0) continue
 
