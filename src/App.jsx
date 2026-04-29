@@ -20,6 +20,9 @@ import SettingsModal from './components/SettingsModal'
 import WorkModeBar from './components/WorkModeBar'
 import ConfirmDialog from './components/ConfirmDialog'
 import ZipDropzone from './components/ZipDropzone'
+import MoveCellsDialog from './components/MoveCellsDialog'
+import MergeProjectDialog from './components/MergeProjectDialog'
+import ChangePrefixDialog from './components/ChangePrefixDialog'
 import { TaskLogProvider, useTaskLog } from './contexts/TaskLogContext'
 import { compactIdentifiers } from './utils/identifierRange'
 import {
@@ -30,6 +33,12 @@ import {
 import { readImportFile } from './utils/parseZip'
 import { parseMdFile } from './utils/parseMdFile'
 import { ensureUniquePrefix } from './utils/generatePrefix'
+import {
+  changeProjectPrefix,
+  mergeProjects,
+  moveCellsToProject,
+  moveToCellsToNewProject,
+} from './utils/cellMover'
 
 function AppShell() {
   const [user, setUser] = useState(null)
@@ -49,6 +58,11 @@ function AppShell() {
 
   const [importing, setImporting] = useState(false)
   const [importProgress, setImportProgress] = useState(null)
+
+  // 이동/합치기/접두어 변경 모달 상태
+  const [moveDialog, setMoveDialog] = useState(null) // { mode: 'new'|'existing', cells }
+  const [mergeDialog, setMergeDialog] = useState(null) // sourceProject
+  const [prefixDialog, setPrefixDialog] = useState(null) // project
 
   const taskLog = useTaskLog()
   const { settings, update: updateSettings, reset: resetSettings } = useSettings()
@@ -103,7 +117,6 @@ function AppShell() {
       await signInWithPopup(auth, googleProvider)
     } catch (e) {
       console.error('Sign in failed:', e)
-      // 사용자가 팝업을 닫은 경우는 에러 표시 안 함
       if (
         e.code !== 'auth/popup-closed-by-user' &&
         e.code !== 'auth/cancelled-popup-request'
@@ -130,7 +143,6 @@ function AppShell() {
       taskLog.succeedTask(taskId, `프로젝트 "${name}" 생성됨`)
       setSelectedProjectId(id)
     } catch (e) {
-      console.error('Create project failed:', e)
       taskLog.failTask(taskId, `생성 실패: ${e.message}`)
       throw e
     }
@@ -142,7 +154,6 @@ function AppShell() {
       await updateProject(id, patch)
       taskLog.succeedTask(taskId, `프로젝트 수정됨`)
     } catch (e) {
-      console.error('Update project failed:', e)
       taskLog.failTask(taskId, `수정 실패: ${e.message}`)
       throw e
     }
@@ -155,7 +166,6 @@ function AppShell() {
       await deleteProject(id)
       taskLog.succeedTask(taskId, `프로젝트 삭제됨`)
     } catch (e) {
-      console.error('Delete project failed:', e)
       taskLog.failTask(taskId, `삭제 실패: ${e.message}`)
       throw e
     }
@@ -168,7 +178,6 @@ function AppShell() {
       await addCells(selectedProjectId, prompts)
       taskLog.succeedTask(taskId, `${prompts.length}개 프롬프트 저장됨`)
     } catch (e) {
-      console.error('Add cells failed:', e)
       taskLog.failTask(taskId, `저장 실패: ${e.message}`)
       throw e
     }
@@ -181,7 +190,6 @@ function AppShell() {
       taskLog.succeedTask(taskId, `${cell.identifier} 삭제됨`)
       setSelectedCellId(null)
     } catch (e) {
-      console.error('Delete cell failed:', e)
       taskLog.failTask(taskId, `삭제 실패: ${e.message}`)
     }
   }
@@ -192,7 +200,6 @@ function AppShell() {
       const id = taskLog.startTask(`${cell.identifier} 프롬프트 복사됨`)
       taskLog.succeedTask(id, `${cell.identifier} 프롬프트 복사됨`)
     } catch (e) {
-      console.error('Copy failed:', e)
       const id = taskLog.startTask('복사 실패')
       taskLog.failTask(id, e.message)
     }
@@ -202,42 +209,35 @@ function AppShell() {
     try {
       await updateCell(selectedProjectId, cell.id, { rating })
     } catch (e) {
-      console.error('Rating update failed:', e)
       const id = taskLog.startTask('별점 업데이트 실패')
       taskLog.failTask(id, e.message)
     }
   }
 
-  // ===== zip 일괄 가져오기 =====
+  // ===== zip 가져오기 =====
 
   const handleImportFile = async (file) => {
     if (importing) return
     setImporting(true)
     setImportProgress({ current: 0, total: 100, label: '파일 읽는 중…' })
-
     const importTaskId = taskLog.startTask(`"${file.name}" 가져오는 중…`)
-
     try {
       const fileEntries = await readImportFile(file)
       if (fileEntries.length === 0) {
         throw new Error('처리 가능한 파일이 없습니다 (.md/.txt만 지원)')
       }
-
       setImportProgress({
         current: 0,
         total: fileEntries.length,
         label: `${fileEntries.length}개 파일 분석 중…`,
       })
-
       const parsed = fileEntries.map((entry) =>
         parseMdFile(entry.filename, entry.content)
       )
-
       let totalProjectsCreated = 0
       let totalProjectsMerged = 0
       let totalPromptsAdded = 0
       const skipped = []
-
       for (let i = 0; i < parsed.length; i++) {
         const item = parsed[i]
         setImportProgress({
@@ -245,16 +245,13 @@ function AppShell() {
           total: parsed.length,
           label: `${item.filename} 처리 중…`,
         })
-
         if (item.prompts.length === 0) {
           skipped.push(item.filename)
           const skipId = taskLog.startTask(`${item.filename} 스킵 (프롬프트 0개)`)
           taskLog.failTask(skipId, `${item.filename} 스킵: 프롬프트 없음`)
           continue
         }
-
         const existing = findExistingProjectByName(item.projectName, projects)
-
         if (existing) {
           const mergeId = taskLog.startTask(
             `${item.filename} → "${existing.name}"에 ${item.prompts.length}개 추가 중…`
@@ -268,13 +265,11 @@ function AppShell() {
               `"${existing.name}"에 ${item.prompts.length}개 추가됨`
             )
           } catch (e) {
-            console.error('Merge failed:', e)
             taskLog.failTask(mergeId, `병합 실패: ${e.message}`)
           }
         } else {
           const existingPrefixes = projects.map((p) => p.prefix)
           const uniquePrefix = ensureUniquePrefix(item.prefix || 'x', existingPrefixes)
-
           const createId = taskLog.startTask(
             `${item.filename} → 신규 프로젝트 "${item.projectName}" 생성 중…`
           )
@@ -292,18 +287,10 @@ function AppShell() {
               `"${item.projectName}" 생성 + ${item.prompts.length}개 추가됨`
             )
           } catch (e) {
-            console.error('Create failed:', e)
             taskLog.failTask(createId, `생성 실패: ${e.message}`)
           }
         }
       }
-
-      setImportProgress({
-        current: parsed.length,
-        total: parsed.length,
-        label: '완료',
-      })
-
       const summary = [
         totalProjectsCreated > 0 ? `${totalProjectsCreated}개 신규` : null,
         totalProjectsMerged > 0 ? `${totalProjectsMerged}개 병합` : null,
@@ -312,10 +299,8 @@ function AppShell() {
       ]
         .filter(Boolean)
         .join(' · ')
-
       taskLog.succeedTask(importTaskId, `가져오기 완료: ${summary}`)
     } catch (e) {
-      console.error('Import failed:', e)
       taskLog.failTask(importTaskId, `가져오기 실패: ${e.message}`)
     } finally {
       setImporting(false)
@@ -390,6 +375,8 @@ function AppShell() {
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId)
 
+  // ===== 일괄 동작 =====
+
   const handleCopyIdentifiers = async () => {
     const selected = getSelectedCells()
     if (selected.length === 0) return
@@ -416,7 +403,6 @@ function AppShell() {
       )
       taskLog.succeedTask(taskId, `텍스트 다운로드 완료 (${selected.length}개)`)
     } catch (e) {
-      console.error('Download text failed:', e)
       taskLog.failTask(taskId, `다운로드 실패: ${e.message}`)
     }
   }
@@ -434,7 +420,6 @@ function AppShell() {
       await downloadImagesOnly(selected, selectedProject?.name)
       taskLog.succeedTask(taskId, `이미지 다운로드 완료 (${totalImages}장)`)
     } catch (e) {
-      console.error('Download images failed:', e)
       taskLog.failTask(taskId, `다운로드 실패: ${e.message}`)
     }
   }
@@ -447,7 +432,6 @@ function AppShell() {
       await downloadAll(selected, selectedProject?.name, settings.textDownloadFormat)
       taskLog.succeedTask(taskId, `zip 다운로드 완료 (${selected.length}개)`)
     } catch (e) {
-      console.error('Download all failed:', e)
       taskLog.failTask(taskId, `다운로드 실패: ${e.message}`)
     }
   }
@@ -462,7 +446,6 @@ function AppShell() {
     if (!deleteConfirm) return
     const targets = deleteConfirm.cells
     setDeleteConfirm(null)
-
     const taskId = taskLog.startTask(`${targets.length}개 셀 삭제 중…`)
     try {
       for (const cell of targets) {
@@ -484,8 +467,131 @@ function AppShell() {
       setSelectedIds(new Set())
       lastClickedIndexRef.current = null
     } catch (e) {
-      console.error('Bulk delete failed:', e)
       taskLog.failTask(taskId, `삭제 실패: ${e.message}`)
+    }
+  }
+
+  // ===== 이동/합치기/접두어 =====
+
+  const handleMove = (mode) => {
+    const selected = getSelectedCells()
+    if (selected.length === 0) return
+    setMoveDialog({ mode, cells: selected })
+  }
+
+  const handleConfirmMoveToNew = async ({ name, prefix }) => {
+    const targets = moveDialog?.cells ?? []
+    setMoveDialog(null)
+    const taskId = taskLog.startTask(
+      `${targets.length}개 셀 → 새 프로젝트 "${name}"으로 이동 중…`
+    )
+    try {
+      const result = await moveToCellsToNewProject({
+        userId: user.uid,
+        srcProjectId: selectedProjectId,
+        cells: targets,
+        newProjectName: name,
+        newProjectPrefix: prefix,
+        onProgress: (p) => {
+          taskLog.updateTask?.(taskId, p.label)
+        },
+      })
+      taskLog.succeedTask(
+        taskId,
+        `"${name}" 생성 + ${result.moved}개 이동 완료 (${result.mapping[0]?.from} → ${result.mapping[0]?.to} ...)`
+      )
+      setSelectedIds(new Set())
+      lastClickedIndexRef.current = null
+    } catch (e) {
+      taskLog.failTask(taskId, `이동 실패: ${e.message}`)
+    }
+  }
+
+  const handleConfirmMoveToExisting = async (dstProjectId) => {
+    const targets = moveDialog?.cells ?? []
+    setMoveDialog(null)
+    const dstProject = projects.find((p) => p.id === dstProjectId)
+    const taskId = taskLog.startTask(
+      `${targets.length}개 셀 → "${dstProject?.name}"으로 이동 중…`
+    )
+    try {
+      const result = await moveCellsToProject({
+        srcProjectId: selectedProjectId,
+        dstProjectId,
+        cells: targets,
+        onProgress: (p) => {
+          taskLog.updateTask?.(taskId, p.label)
+        },
+      })
+      taskLog.succeedTask(
+        taskId,
+        `${result.moved}개 → "${dstProject?.name}"로 이동 완료`
+      )
+      setSelectedIds(new Set())
+      lastClickedIndexRef.current = null
+    } catch (e) {
+      taskLog.failTask(taskId, `이동 실패: ${e.message}`)
+    }
+  }
+
+  const handleMergeRequest = (project) => {
+    setMergeDialog(project)
+  }
+
+  const handleConfirmMerge = async (dstProjectId) => {
+    const src = mergeDialog
+    setMergeDialog(null)
+    if (!src) return
+    const dstProject = projects.find((p) => p.id === dstProjectId)
+    const taskId = taskLog.startTask(
+      `"${src.name}" → "${dstProject?.name}" 합치는 중…`
+    )
+    try {
+      const result = await mergeProjects({
+        srcProjectId: src.id,
+        dstProjectId,
+        onProgress: (p) => {
+          taskLog.updateTask?.(taskId, p.label)
+        },
+      })
+      taskLog.succeedTask(
+        taskId,
+        `${result.moved}개 셀이 "${dstProject?.name}"로 이동, "${src.name}" 삭제됨`
+      )
+      // 선택된 프로젝트가 합쳐진 거면 대상 프로젝트로 전환
+      if (selectedProjectId === src.id) {
+        setSelectedProjectId(dstProjectId)
+      }
+    } catch (e) {
+      taskLog.failTask(taskId, `합치기 실패: ${e.message}`)
+    }
+  }
+
+  const handlePrefixRequest = (project) => {
+    setPrefixDialog(project)
+  }
+
+  const handleConfirmPrefix = async (newPrefix) => {
+    const target = prefixDialog
+    setPrefixDialog(null)
+    if (!target) return
+    const taskId = taskLog.startTask(
+      `"${target.name}" 접두어 ${target.prefix} → ${newPrefix} 변경 중…`
+    )
+    try {
+      const result = await changeProjectPrefix({
+        projectId: target.id,
+        newPrefix,
+        onProgress: (p) => {
+          taskLog.updateTask?.(taskId, p.label)
+        },
+      })
+      taskLog.succeedTask(
+        taskId,
+        `${target.name}: ${result.changed}개 셀 식별어 업데이트 완료`
+      )
+    } catch (e) {
+      taskLog.failTask(taskId, `접두어 변경 실패: ${e.message}`)
     }
   }
 
@@ -592,6 +698,8 @@ function AppShell() {
           onCreate={handleCreateProject}
           onUpdate={handleUpdateProject}
           onDelete={handleDeleteProject}
+          onMerge={handleMergeRequest}
+          onChangePrefix={handlePrefixRequest}
         />
 
         <main className="workspace">
@@ -634,6 +742,7 @@ function AppShell() {
                   onDownloadText={handleDownloadText}
                   onDownloadImages={handleDownloadImages}
                   onDownloadAll={handleDownloadAll}
+                  onMove={handleMove}
                   onDelete={handleBulkDeleteRequest}
                 />
               )}
@@ -708,6 +817,32 @@ function AppShell() {
         danger
         onConfirm={handleBulkDeleteConfirmed}
         onCancel={() => setDeleteConfirm(null)}
+      />
+
+      <MoveCellsDialog
+        open={!!moveDialog}
+        selectedCells={moveDialog?.cells || []}
+        projects={projects}
+        currentProjectId={selectedProjectId}
+        onConfirmMoveToNew={handleConfirmMoveToNew}
+        onConfirmMoveToExisting={handleConfirmMoveToExisting}
+        onClose={() => setMoveDialog(null)}
+      />
+
+      <MergeProjectDialog
+        open={!!mergeDialog}
+        sourceProject={mergeDialog}
+        projects={projects}
+        onConfirm={handleConfirmMerge}
+        onClose={() => setMergeDialog(null)}
+      />
+
+      <ChangePrefixDialog
+        open={!!prefixDialog}
+        project={prefixDialog}
+        existingPrefixes={projects.map((p) => p.prefix)}
+        onConfirm={handleConfirmPrefix}
+        onClose={() => setPrefixDialog(null)}
       />
 
       <TaskLog />
