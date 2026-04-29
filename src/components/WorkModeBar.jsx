@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 const HELP_DISMISSED_KEY = 'prompt-cabinet:work-help-dismissed:v1'
 
@@ -11,17 +11,30 @@ export default function WorkModeBar({
   onDownloadImages,
   onDownloadAll,
   onCopyIdentifiers,
+  onMove,
   onDelete,
 }) {
   const [helpOpen, setHelpOpen] = useState(false)
+  const [moveMenuOpen, setMoveMenuOpen] = useState(false)
+  const moveRef = useRef(null)
 
   useEffect(() => {
-    // 처음 사용 시 안내 자동 펼침
     try {
       const dismissed = localStorage.getItem(HELP_DISMISSED_KEY) === '1'
       if (!dismissed) setHelpOpen(true)
     } catch {}
   }, [])
+
+  useEffect(() => {
+    if (!moveMenuOpen) return
+    const onClickOutside = (e) => {
+      if (moveRef.current && !moveRef.current.contains(e.target)) {
+        setMoveMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [moveMenuOpen])
 
   const closeHelp = () => {
     setHelpOpen(false)
@@ -32,6 +45,11 @@ export default function WorkModeBar({
 
   const hasSelection = selectedCount > 0
   const allSelected = selectedCount === totalCount && totalCount > 0
+
+  const handleMoveClick = (mode) => {
+    setMoveMenuOpen(false)
+    onMove?.(mode)
+  }
 
   return (
     <div className="work-bar">
@@ -98,6 +116,33 @@ export default function WorkModeBar({
           >
             둘 다 (zip)
           </button>
+
+          <div className="work-bar__move" ref={moveRef}>
+            <button
+              className="work-bar__btn"
+              onClick={() => setMoveMenuOpen((v) => !v)}
+              disabled={!hasSelection}
+            >
+              이동 ▾
+            </button>
+            {moveMenuOpen && (
+              <div className="work-bar__move-menu" role="menu">
+                <button
+                  className="work-bar__move-item"
+                  onClick={() => handleMoveClick('new')}
+                >
+                  새 프로젝트로 빼기
+                </button>
+                <button
+                  className="work-bar__move-item"
+                  onClick={() => handleMoveClick('existing')}
+                >
+                  기존 프로젝트로
+                </button>
+              </div>
+            )}
+          </div>
+
           <button
             className="work-bar__btn work-bar__btn--danger"
             onClick={onDelete}
@@ -122,25 +167,27 @@ export default function WorkModeBar({
           </div>
           <ul className="work-bar__help-list">
             <li>
-              <span className="kbd">클릭</span>으로 셀을 하나씩 선택/해제
+              <span className="kbd">클릭</span>으로 셀 하나씩 선택/해제
             </li>
             <li>
-              <span className="kbd">Shift+클릭</span>으로 범위 선택 (마지막 선택부터)
+              <span className="kbd">Shift+클릭</span>으로 범위 선택
             </li>
             <li>
               <span className="kbd">드래그</span>로 첫 셀부터 끝 셀까지 한 번에 선택
             </li>
             <li>
-              <span className="kbd">전체 선택</span> 버튼으로 현재 정렬된 모든 셀 선택
+              <strong>이동</strong> 버튼으로 다른 프로젝트로 빼거나 합칠 수 있어요
             </li>
-            <li>선택 후 <strong>텍스트/이미지/둘 다</strong>로 다운로드</li>
             <li>
-              <strong>식별어 복사</strong>는 명령 모드에 붙여넣을 때 유용 (Step 7)
+              <strong>식별어 복사</strong>는 명령 모드 입력에 활용 (Step 7)
             </li>
-            <li>다운로드 형식과 자동 축소 크기는 <strong>⚙ 환경설정</strong>에서 변경</li>
+            <li>
+              다운로드 형식과 자동 축소는 <strong>⚙ 환경설정</strong>에서 변경
+            </li>
           </ul>
           <div className="work-bar__help-note">
-            도움말은 다시 보지 않습니다. 필요하면 좌측의 <span className="kbd">?</span> 버튼을 누르세요.
+            도움말은 다시 보지 않습니다. 필요하면{' '}
+            <span className="kbd">?</span> 버튼을 누르세요.
           </div>
         </div>
       )}
