@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  getRedirectResult,
   onAuthStateChanged,
-  signInWithRedirect,
+  signInWithPopup,
   signOut,
 } from 'firebase/auth'
 import { writeBatch, doc } from 'firebase/firestore'
@@ -36,6 +35,7 @@ function AppShell() {
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [authError, setAuthError] = useState(null)
+  const [signingIn, setSigningIn] = useState(false)
   const [workMode, setWorkMode] = useState(false)
   const [selectedProjectId, setSelectedProjectId] = useState(null)
   const [selectedCellId, setSelectedCellId] = useState(null)
@@ -47,7 +47,6 @@ function AppShell() {
 
   const [deleteConfirm, setDeleteConfirm] = useState(null)
 
-  // zip import 상태
   const [importing, setImporting] = useState(false)
   const [importProgress, setImportProgress] = useState(null)
 
@@ -59,10 +58,6 @@ function AppShell() {
   const { cells, deleteCell, updateCell } = useCells(selectedProjectId)
 
   useEffect(() => {
-    getRedirectResult(auth).catch((err) => {
-      console.error('Redirect error:', err)
-      setAuthError(err.message)
-    })
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u)
       setAuthLoading(false)
@@ -103,10 +98,20 @@ function AppShell() {
 
   const handleSignIn = async () => {
     setAuthError(null)
+    setSigningIn(true)
     try {
-      await signInWithRedirect(auth, googleProvider)
+      await signInWithPopup(auth, googleProvider)
     } catch (e) {
-      setAuthError(e.message)
+      console.error('Sign in failed:', e)
+      // 사용자가 팝업을 닫은 경우는 에러 표시 안 함
+      if (
+        e.code !== 'auth/popup-closed-by-user' &&
+        e.code !== 'auth/cancelled-popup-request'
+      ) {
+        setAuthError(e.message)
+      }
+    } finally {
+      setSigningIn(false)
     }
   }
 
@@ -213,7 +218,6 @@ function AppShell() {
     const importTaskId = taskLog.startTask(`"${file.name}" 가져오는 중…`)
 
     try {
-      // 1. zip/단일 파일 풀기
       const fileEntries = await readImportFile(file)
       if (fileEntries.length === 0) {
         throw new Error('처리 가능한 파일이 없습니다 (.md/.txt만 지원)')
@@ -225,12 +229,10 @@ function AppShell() {
         label: `${fileEntries.length}개 파일 분석 중…`,
       })
 
-      // 2. 각 파일 파싱
       const parsed = fileEntries.map((entry) =>
         parseMdFile(entry.filename, entry.content)
       )
 
-      // 3. 처리: 같은 이름 프로젝트는 병합, 없으면 신규 생성
       let totalProjectsCreated = 0
       let totalProjectsMerged = 0
       let totalPromptsAdded = 0
@@ -251,11 +253,9 @@ function AppShell() {
           continue
         }
 
-        // 기존 프로젝트와 이름 매칭
         const existing = findExistingProjectByName(item.projectName, projects)
 
         if (existing) {
-          // 병합
           const mergeId = taskLog.startTask(
             `${item.filename} → "${existing.name}"에 ${item.prompts.length}개 추가 중…`
           )
@@ -272,7 +272,6 @@ function AppShell() {
             taskLog.failTask(mergeId, `병합 실패: ${e.message}`)
           }
         } else {
-          // 신규 생성
           const existingPrefixes = projects.map((p) => p.prefix)
           const uniquePrefix = ensureUniquePrefix(item.prefix || 'x', existingPrefixes)
 
@@ -292,9 +291,6 @@ function AppShell() {
               createId,
               `"${item.projectName}" 생성 + ${item.prompts.length}개 추가됨`
             )
-            // 새 프로젝트가 projects 배열에 반영될 시간 (next iteration의 findExistingProjectByName에서 인지하기 위해)
-            // 단 onSnapshot은 비동기라 즉시 반영 안 될 수 있음 → 내부 추적 배열 필요
-            // 간단히 그냥 진행 (같은 이름의 신규 파일 두 개 들어오면 둘 다 신규로 처리됨)
           } catch (e) {
             console.error('Create failed:', e)
             taskLog.failTask(createId, `생성 실패: ${e.message}`)
@@ -533,8 +529,12 @@ function AppShell() {
               <br />
               기기 간에 동기화됩니다.
             </p>
-            <button className="btn-primary" onClick={handleSignIn}>
-              Google로 로그인
+            <button
+              className="btn-primary"
+              onClick={handleSignIn}
+              disabled={signingIn}
+            >
+              {signingIn ? '로그인 중…' : 'Google로 로그인'}
             </button>
             {authError && <div className="error-msg">{authError}</div>}
           </div>
@@ -645,7 +645,6 @@ function AppShell() {
                     onFileSelected={handleImportFile}
                     importing={importing}
                     progress={importProgress}
-                    compact
                   />
                 </>
               )}
