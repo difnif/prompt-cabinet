@@ -1498,3 +1498,292 @@ code {
   .zip-dropzone { padding: 24px 16px; }
   .project-menu__trigger { opacity: 1; }
 }
+/* ────────────────────────────────────────
+   자동 분류 플로팅 카드 (AutoClassifyCard)
+   우하단 고정. TaskLog 위에 배치되도록 bottom 값 조정.
+   index.css 끝에 그대로 붙여넣기.
+   ──────────────────────────────────────── */
+
+.ac-card {
+  position: fixed;
+  right: 16px;
+  bottom: 80px; /* TaskLog가 보통 16~50px에 있으니 그 위 */
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  background: #1c1c1f;
+  color: #e8e8ea;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  max-height: 70vh;
+  overflow: hidden;
+}
+
+.ac-card--collapsed {
+  width: 280px;
+}
+
+.ac-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.ac-card__title {
+  font-weight: 600;
+  font-size: 14px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ac-card__compact-progress {
+  font-size: 12px;
+  color: #a0a0a8;
+  white-space: nowrap;
+}
+
+.ac-card__icon-btn {
+  background: transparent;
+  border: none;
+  color: #a0a0a8;
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 14px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.ac-card__icon-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e8e8ea;
+}
+
+.ac-card__body {
+  padding: 14px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.ac-card--collapsed .ac-card__body {
+  display: none;
+}
+
+.ac-card__summary,
+.ac-card__lead {
+  font-size: 14px;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.ac-card__warning {
+  color: #f5a;
+  margin: 0;
+}
+.ac-card__hint {
+  color: #888;
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+.ac-card__error {
+  color: #ff7070;
+  margin: 0;
+}
+.ac-card__resumed {
+  color: #6cb;
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
+.ac-card__progress-bar {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 0;
+}
+
+.ac-card--collapsed .ac-card__progress-bar {
+  border-radius: 0;
+  margin-top: -1px;
+}
+
+.ac-card__progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4a90e2, #5fa);
+  transition: width 0.3s ease;
+}
+
+.ac-card__progress-text {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: #a0a0a8;
+}
+
+.ac-card__current-label {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #d0d0d4;
+  min-height: 1em;
+}
+
+.ac-card__group-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+/* 미리보기에서 쓰는 그룹 리스트 */
+.ac-card__body > .ac-card__group-list > li {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ac-card__body > .ac-card__group-list > li:last-child {
+  border-bottom: 0;
+}
+
+/* 진행 중 그룹 항목 */
+.ac-card__group-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.ac-card__group-item:last-child {
+  border-bottom: 0;
+}
+.ac-card__group-item .ac-card__group-label {
+  flex: 1;
+}
+.ac-card__group-item .ac-card__group-count {
+  color: #888;
+  font-size: 12px;
+}
+
+.ac-card__group-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ac-card__group-item.is-done .ac-card__group-status-icon {
+  color: #5fa;
+}
+.ac-card__group-item.is-running .ac-card__group-status-icon {
+  color: #6cb;
+  animation: ac-spin 1.5s linear infinite;
+}
+.ac-card__group-item.is-failed .ac-card__group-status-icon {
+  color: #ff7070;
+}
+.ac-card__group-item.is-pending .ac-card__group-status-icon {
+  color: #555;
+}
+.ac-card__group-item.is-done .ac-card__group-label {
+  color: #888;
+}
+
+@keyframes ac-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ac-card__group-label {
+  font-weight: 500;
+}
+.ac-card__group-count {
+  color: #888;
+  font-size: 12px;
+}
+
+.ac-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.ac-card--collapsed .ac-card__footer {
+  display: none;
+}
+
+.ac-card__btn {
+  padding: 7px 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e8e8ea;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.ac-card__btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+.ac-card__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ac-card__btn--primary {
+  background: #4a90e2;
+  border-color: #4a90e2;
+  color: white;
+  font-weight: 500;
+}
+.ac-card__btn--primary:hover {
+  background: #5aa0f2;
+}
+.ac-card__btn--danger {
+  background: rgba(255, 70, 70, 0.15);
+  border-color: rgba(255, 70, 70, 0.3);
+  color: #ff9090;
+}
+.ac-card__btn--danger:hover {
+  background: rgba(255, 70, 70, 0.25);
+}
+
+.ac-card__queue {
+  font-size: 11px;
+  color: #888;
+  margin-right: auto;
+}
+
+/* 모바일 */
+@media (max-width: 640px) {
+  .ac-card {
+    right: 8px;
+    left: 8px;
+    bottom: 70px;
+    width: auto;
+    max-width: none;
+  }
+  .ac-card--collapsed {
+    width: auto;
+  }
+}
