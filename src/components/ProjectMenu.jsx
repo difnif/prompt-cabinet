@@ -7,12 +7,14 @@ import { useEffect, useRef, useState } from 'react'
  * @param {() => void} props.onRename
  * @param {() => void} props.onMerge
  * @param {() => void} props.onChangePrefix
+ * @param {() => void} props.onAutoClassify
  * @param {() => void} props.onDelete
  */
 export default function ProjectMenu({
   onRename,
   onMerge,
   onChangePrefix,
+  onAutoClassify,
   onDelete,
 }) {
   const [open, setOpen] = useState(false)
@@ -72,6 +74,15 @@ export default function ProjectMenu({
             }}
           >
             접두어 변경
+          </button>
+          <button
+            className="project-menu__item"
+            onClick={(e) => {
+              e.stopPropagation()
+              handleAction(onAutoClassify)
+            }}
+          >
+            자동 분류
           </button>
           <button
             className="project-menu__item"
