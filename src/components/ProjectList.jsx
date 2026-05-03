@@ -12,6 +12,7 @@ export default function ProjectList({
   onDelete,
   onMerge,
   onChangePrefix,
+  onAutoClassify,
 }) {
   const [creating, setCreating] = useState(false)
   const [editingId, setEditingId] = useState(null)
@@ -59,6 +60,7 @@ export default function ProjectList({
         {projects.map((p) => {
           const isEditing = editingId === p.id
           const isSelected = p.id === selectedId
+
           if (isEditing) {
             return (
               <li key={p.id}>
@@ -83,6 +85,7 @@ export default function ProjectList({
               </li>
             )
           }
+
           return (
             <li
               key={p.id}
@@ -100,6 +103,7 @@ export default function ProjectList({
                 onRename={() => setEditingId(p.id)}
                 onMerge={() => onMerge?.(p)}
                 onChangePrefix={() => onChangePrefix?.(p)}
+                onAutoClassify={() => onAutoClassify?.(p)}
                 onDelete={async () => {
                   if (
                     confirm(`프로젝트 "${p.name}"과 모든 셀을 삭제할까요?`)
