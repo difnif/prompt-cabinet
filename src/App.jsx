@@ -4,7 +4,7 @@ import {
   signInWithPopup,
   signOut,
 } from 'firebase/auth'
-import { writeBatch, doc, collection, getDocs } from 'firebase/firestore'
+import { writeBatch, doc } from 'firebase/firestore'
 import { ref as storageRef, deleteObject } from 'firebase/storage'
 import { auth, db, googleProvider, storage } from './firebase'
 import { useProjects } from './hooks/useProjects'
@@ -23,8 +23,12 @@ import ZipDropzone from './components/ZipDropzone'
 import MoveCellsDialog from './components/MoveCellsDialog'
 import MergeProjectDialog from './components/MergeProjectDialog'
 import ChangePrefixDialog from './components/ChangePrefixDialog'
-import AutoClassifyDialog from './components/AutoClassifyDialog'
+import AutoClassifyCard from './components/AutoClassifyCard'
 import { TaskLogProvider, useTaskLog } from './contexts/TaskLogContext'
+import {
+  AutoClassifyProvider,
+  useAutoClassify,
+} from './contexts/AutoClassifyContext'
 import { compactIdentifiers } from './utils/identifierRange'
 import {
   downloadAll,
@@ -41,7 +45,11 @@ import {
   moveToCellsToNewProject,
 } from './utils/cellMover'
 
-function AppShell() {
+/**
+ * 메인 앱 — 자동 분류 컨텍스트 안에서 동작.
+ * Provider는 더 외부 App에서 감싸고, 여기서 useAutoClassify()로 함수 받아 씀.
+ */
+function MainApp() {
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [authError, setAuthError] = useState(null)
@@ -60,18 +68,22 @@ function AppShell() {
   const [importing, setImporting] = useState(false)
   const [importProgress, setImportProgress] = useState(null)
 
-  // 이동/합치기/접두어 변경/자동분류 모달 상태
-  const [moveDialog, setMoveDialog] = useState(null) // { mode: 'new'|'existing', cells }
-  const [mergeDialog, setMergeDialog] = useState(null) // sourceProject
-  const [prefixDialog, setPrefixDialog] = useState(null) // project
-  const [autoClassifyDialog, setAutoClassifyDialog] = useState(null) // { project, cells }
+  const [moveDialog, setMoveDialog] = useState(null)
+  const [mergeDialog, setMergeDialog] = useState(null)
+  const [prefixDialog, setPrefixDialog] = useState(null)
 
   const taskLog = useTaskLog()
+  const autoClassify = useAutoClassify()
   const { settings, update: updateSettings, reset: resetSettings } = useSettings()
 
   const { projects, loading, createProject, updateProject, deleteProject, addCells } =
     useProjects(user?.uid)
   const { cells, deleteCell, updateCell } = useCells(selectedProjectId)
+
+  // 자동 분류 컨텍스트에 user/projects/taskLog 동기화
+  useEffect(() => {
+    autoClassify.setRuntime?.({ userId: user?.uid, projects, taskLog })
+  }, [user?.uid, projects, taskLog, autoClassify])
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -560,7 +572,6 @@ function AppShell() {
         taskId,
         `${result.moved}개 셀이 "${dstProject?.name}"로 이동, "${src.name}" 삭제됨`
       )
-      // 선택된 프로젝트가 합쳐진 거면 대상 프로젝트로 전환
       if (selectedProjectId === src.id) {
         setSelectedProjectId(dstProjectId)
       }
@@ -598,59 +609,13 @@ function AppShell() {
   }
 
   // ===== 자동 분류 =====
-
-  const handleAutoClassifyRequest = async (project) => {
-    const taskId = taskLog.startTask(`"${project.name}" 셀 분석 준비 중…`)
-    try {
-      const snap = await getDocs(collection(db, 'projects', project.id, 'cells'))
-      const cellsData = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      taskLog.succeedTask(taskId, `${cellsData.length}개 셀 로드 완료`)
-      setAutoClassifyDialog({ project, cells: cellsData })
-    } catch (e) {
-      taskLog.failTask(taskId, `로드 실패: ${e.message}`)
-    }
+  const handleAutoClassifyRequest = (project) => {
+    autoClassify.requestClassification(project)
   }
 
-  const handleConfirmAutoClassify = async (plannedGroups, onProgress) => {
-    if (!autoClassifyDialog) {
-      return { projectsCreated: 0, cellsMoved: 0 }
-    }
-    const src = autoClassifyDialog.project
-    const taskId = taskLog.startTask(
-      `"${src.name}" 자동 분류: ${plannedGroups.length}개 그룹 생성 중…`
-    )
-
-    let cellsMoved = 0
-    try {
-      for (let i = 0; i < plannedGroups.length; i++) {
-        const g = plannedGroups[i]
-        onProgress(i, `${g.label} 분리 중 (${g.cells.length}개)`)
-
-        const result = await moveToCellsToNewProject({
-          userId: user.uid,
-          srcProjectId: src.id,
-          cells: g.cells,
-          newProjectName: g.newProjectName,
-          newProjectPrefix: g.newPrefix,
-          onProgress: (p) => {
-            taskLog.updateTask?.(taskId, `[${g.label}] ${p.label}`)
-          },
-        })
-
-        cellsMoved += result.moved
-        onProgress(i + 1, `${g.label} 완료`)
-      }
-
-      taskLog.succeedTask(
-        taskId,
-        `자동 분류 완료: 새 프로젝트 ${plannedGroups.length}개, ${cellsMoved}개 셀 이동`
-      )
-      return { projectsCreated: plannedGroups.length, cellsMoved }
-    } catch (e) {
-      taskLog.failTask(taskId, `자동 분류 실패: ${e.message}`)
-      throw e // 다이얼로그가 에러 화면 표시
-    }
-  }
+  // ──────────────────────────────────────
+  // 화면
+  // ──────────────────────────────────────
 
   if (authLoading) {
     return (
@@ -903,16 +868,7 @@ function AppShell() {
         onClose={() => setPrefixDialog(null)}
       />
 
-      <AutoClassifyDialog
-        isOpen={!!autoClassifyDialog}
-        onClose={() => setAutoClassifyDialog(null)}
-        sourceProject={autoClassifyDialog?.project}
-        cells={autoClassifyDialog?.cells || []}
-        allProjects={projects}
-        onExecute={handleConfirmAutoClassify}
-        minGroupSize={50}
-      />
-
+      <AutoClassifyCard />
       <TaskLog />
     </div>
   )
@@ -927,7 +883,9 @@ function findExistingProjectByName(name, projects) {
 export default function App() {
   return (
     <TaskLogProvider>
-      <AppShell />
+      <AutoClassifyProvider>
+        <MainApp />
+      </AutoClassifyProvider>
     </TaskLogProvider>
   )
 }
