@@ -14,6 +14,18 @@ import { db } from '../firebase'
 const BATCH_SIZE = 400 // Firestore 한도(500)보다 여유있게
 
 /**
+ * Firestore에 쓸 객체에서 undefined 필드 제거.
+ * (Firebase JS SDK는 ignoreUndefinedProperties 옵션 없으면 undefined를 거부함)
+ */
+function stripUndefined(obj) {
+  const out = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) out[k] = v
+  }
+  return out
+}
+
+/**
  * N개 셀을 srcProjectId에서 dstProjectId로 이동.
  * - 대상 프로젝트의 nextNumber를 트랜잭션으로 안전하게 증가
  * - 각 셀에 새 식별어 할당
@@ -89,21 +101,23 @@ export async function moveCellsToProject({
       const newNumber = startNumber + chunkStart + i
       const newIdentifier = `${dstPrefix}${String(newNumber).padStart(2, '0')}`
 
+      // ⚠️ 핵심 fix: id를 객체에서 진짜로 제거 (구조 분해)
+      // 기존 `id: undefined` 패턴은 Firebase가 거부함 (ignoreUndefinedProperties 옵션 안 켰을 때)
+      // eslint-disable-next-line no-unused-vars
+      const { id: _omit, ...cellRest } = cell
+      const cleanCellData = stripUndefined(cellRest)
+
       // 새 위치에 셀 생성
       const newCellRef = doc(collection(db, 'projects', dstProjectId, 'cells'))
       batch.set(newCellRef, {
-        ...cell,
-        // id 필드는 빼고
-        id: undefined,
+        ...cleanCellData,
         prefix: dstPrefix,
         number: newNumber,
         identifier: newIdentifier,
-        originalIdentifier: cell.identifier,
-        originalProjectName: srcName,
+        originalIdentifier: cell.identifier ?? null,
+        originalProjectName: srcName ?? null,
         movedAt: serverTimestamp(),
       })
-      // id 명시적 삭제 (배포 환경에서 undefined 필드 거부 가능)
-      // → batch.set은 undefined 필드를 자동으로 무시함, 안전
 
       // 원본 셀 삭제
       const oldCellRef = doc(db, 'projects', srcProjectId, 'cells', cell.id)
