@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useRef, useState } from 'react'
 import { collection, getDocs } from 'firebase/firestore'
 import { db } from '../firebase'
 import { moveToCellsToNewProject, mergeProjects } from '../utils/cellMover'
@@ -24,17 +24,22 @@ export function useAutoClassify() {
 }
 
 /**
+ * Firestore 셀 doc → 안전한 셀 객체로 변환.
+ * - undefined 필드 모두 제거 (Firestore가 batch.set 시 거부함)
+ * - id는 d.id로 강제 (data 안에 id:undefined가 섞여 있어도 안전)
+ */
+function sanitizeCell(d) {
+  const data = d.data() || {}
+  const out = {}
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== undefined && k !== 'id') out[k] = v
+  }
+  out.id = d.id
+  return out
+}
+
+/**
  * 자동 분류 시스템 — 전역 상태 + 작업 실행기
- *
- * Provider는 외부에서 한 번만 감싸고, 내부에서 setRuntime({ userId, projects, taskLog })
- * 으로 데이터 주입. 이렇게 하면 인증 전/후에도 Provider 위치를 옮기지 않아도 됨.
- *
- * 책임:
- * - 새 작업 시작 (현재 작업 중이면 큐에 쌓기)
- * - 페이지 로드 시 미완료 작업 자동 재개
- * - 그룹별 순차 처리 + 진행률 보고
- * - 취소 시 지금까지 만든 프로젝트들을 원본에 다시 합쳐 원복
- * - 완료 시 큐에서 다음 작업 꺼내 실행
  */
 export function AutoClassifyProvider({ children }) {
   const [currentJob, setCurrentJob] = useState(getCurrentJob())
@@ -45,7 +50,6 @@ export function AutoClassifyProvider({ children }) {
   const [error, setError] = useState(null)
   const [cardCollapsed, setCardCollapsed] = useState(false)
 
-  // 외부에서 주입되는 런타임 (App에서 setRuntime으로 갱신)
   const runtimeRef = useRef({ userId: null, projects: [], taskLog: null })
   const runningRef = useRef(false)
   const cancelRequestedRef = useRef(false)
@@ -53,22 +57,41 @@ export function AutoClassifyProvider({ children }) {
 
   const setRuntime = useCallback((rt) => {
     runtimeRef.current = { ...runtimeRef.current, ...rt }
-    // 처음 userId가 들어오는 시점에 자동 재개 시도
+
+    // 첫 userId 들어오는 시점에 미완료 작업 자동 재개
     if (rt.userId && !resumedOnceRef.current) {
       resumedOnceRef.current = true
       const job = getCurrentJob()
-      if (job && job.userId === rt.userId && !runningRef.current) {
-        // 자동 재개 알림 + 시작
+      if (!job) return
+      if (job.userId !== rt.userId) return
+      if (runningRef.current) return
+
+      // ⚠️ 가드: 이전에 실패한 그룹이 있으면 자동 재개 안 함
+      // (예: WriteBatch 에러로 끝난 작업이 새로고침마다 또 같은 에러 → 무한 루프 방지)
+      const hasFailed = job.plannedGroups.some((g) => g.status === 'failed')
+      if (hasFailed) {
+        setCurrentJob(job)
+        setPhase('error')
+        setError(
+          '이전 작업이 오류로 중단됐어요. "닫기"를 눌러 정리한 후 다시 시도해 주세요.'
+        )
         const tl = runtimeRef.current.taskLog
-        if (tl?.startTask && tl?.succeedTask) {
-          const t = tl.startTask('이전 작업 이어서 진행')
-          tl.succeedTask(t, `"${job.sourceProjectName}" 자동 분류 재개`)
+        if (tl?.startTask && tl?.failTask) {
+          const t = tl.startTask('이전 자동 분류 작업이 오류 상태')
+          tl.failTask(t, '자동 분류 카드에서 닫기를 누르세요')
         }
-        updateCurrentJob({ resumedFromInterrupt: true })
-        setCurrentJob(getCurrentJob())
-        // 약간의 지연 후 시작 (UI 마운트 대기)
-        setTimeout(() => tryRunCurrent(), 300)
+        return
       }
+
+      // 정상 재개
+      const tl = runtimeRef.current.taskLog
+      if (tl?.startTask && tl?.succeedTask) {
+        const t = tl.startTask('이전 작업 이어서 진행')
+        tl.succeedTask(t, `"${job.sourceProjectName}" 자동 분류 재개`)
+      }
+      updateCurrentJob({ resumedFromInterrupt: true })
+      setCurrentJob(getCurrentJob())
+      setTimeout(() => tryRunCurrent(), 300)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -90,7 +113,7 @@ export function AutoClassifyProvider({ children }) {
     const taskId = taskLog?.startTask?.(`"${project.name}" 셀 분석 중…`)
     try {
       const snap = await getDocs(collection(db, 'projects', project.id, 'cells'))
-      const cellsData = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+      const cellsData = snap.docs.map(sanitizeCell)
       const classification = classifyCells(cellsData, { minGroupSize: 50 })
       taskLog?.succeedTask?.(taskId, `${cellsData.length}개 분석 완료`)
       setPendingPreview({ project, cells: cellsData, classification })
@@ -110,7 +133,6 @@ export function AutoClassifyProvider({ children }) {
     const { userId, projects } = runtimeRef.current
     const { project, classification } = pendingPreview
 
-    // 그룹별 새 프로젝트 정보 미리 결정
     const usedPrefixes = new Set(projects.map((p) => p.prefix).filter(Boolean))
     const usedNames = new Set(projects.map((p) => p.name).filter(Boolean))
 
@@ -118,13 +140,15 @@ export function AutoClassifyProvider({ children }) {
       const info = generateGroupProjectInfo(g, project.name, usedPrefixes, usedNames)
       usedPrefixes.add(info.prefix)
       usedNames.add(info.name)
+      // 안전하게 cellId 추출 (undefined 제거)
+      const cellIds = g.cells.map((c) => c.id).filter((id) => typeof id === 'string')
       return {
         categoryId: g.id,
         label: g.label,
         prefix: g.prefix,
         newProjectName: info.name,
         newPrefix: info.prefix,
-        cellIds: g.cells.map((c) => c.id),
+        cellIds,
         createdProjectId: null,
         status: 'pending',
         error: null,
@@ -194,16 +218,15 @@ export function AutoClassifyProvider({ children }) {
           label: `${g.label} 분리 중 (${g.cellIds.length}개)`,
         })
 
-        // 셀 데이터 다시 로드
+        // 셀 데이터 다시 로드 + sanitize
         const snap = await getDocs(
           collection(db, 'projects', job.sourceProjectId, 'cells')
         )
-        const allCells = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        const allCells = snap.docs.map(sanitizeCell)
         const cellIdSet = new Set(g.cellIds)
         const cellsToMove = allCells.filter((c) => cellIdSet.has(c.id))
 
         if (cellsToMove.length === 0) {
-          // 이미 처리됐거나 삭제된 그룹
           updateCurrentJob((j) => {
             const groups = [...j.plannedGroups]
             groups[i] = { ...g, status: 'done' }
@@ -219,6 +242,7 @@ export function AutoClassifyProvider({ children }) {
           return { ...j, plannedGroups: groups, currentGroupIndex: i }
         })
         job = getCurrentJob()
+        setCurrentJob(job)
 
         const result = await moveToCellsToNewProject({
           userId,
@@ -245,14 +269,12 @@ export function AutoClassifyProvider({ children }) {
           return { ...j, plannedGroups: groups, currentGroupIndex: i + 1 }
         })
         job = getCurrentJob()
-        // UI 갱신
         setCurrentJob(job)
       }
 
       if (cancelRequestedRef.current) {
         await rollbackCreatedProjects(job, taskId)
       } else {
-        // 정상 완료
         const completed = job.plannedGroups.filter((g) => g.status === 'done').length
         const totalMoved = job.plannedGroups
           .filter((g) => g.status === 'done')
@@ -267,18 +289,17 @@ export function AutoClassifyProvider({ children }) {
           label: '완료',
         })
         setPhase('done')
-        // 3초 후 자동 닫기 + 다음 큐
         setTimeout(() => finishAndAdvance(), 3000)
       }
     } catch (e) {
       taskLog?.failTask?.(taskId, `자동 분류 실패: ${e.message}`)
       setError(e.message)
       setPhase('error')
-      // 그룹의 status를 failed로
       updateCurrentJob((j) => {
         const groups = [...j.plannedGroups]
         const idx = j.currentGroupIndex
-        if (groups[idx]) groups[idx] = { ...groups[idx], status: 'failed', error: e.message }
+        if (groups[idx])
+          groups[idx] = { ...groups[idx], status: 'failed', error: e.message }
         return { ...j, plannedGroups: groups }
       })
       setCurrentJob(getCurrentJob())
@@ -323,10 +344,7 @@ export function AutoClassifyProvider({ children }) {
       }
     }
 
-    taskLog?.succeedTask?.(
-      parentTaskId,
-      `취소 완료: ${merged}개 프로젝트 원복됨`
-    )
+    taskLog?.succeedTask?.(parentTaskId, `취소 완료: ${merged}개 프로젝트 원복됨`)
     finishAndAdvance()
   }
 
